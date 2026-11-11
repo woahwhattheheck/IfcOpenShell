@@ -1052,3 +1052,21 @@ class BIM_UL_sheets(bpy.types.UIList):
 
 def add_object_button(self, context):
     self.layout.operator("bim.add_reference_image", icon="TEXTURE", text="IFC Reference Image")
+
+
+def draw_drawing_viewport_lock(self, context: bpy.types.Context) -> None:
+    space = context.space_data
+    if not isinstance(space, bpy.types.SpaceView3D) or not space.region_3d or not tool.Ifc.get():
+        return
+    is_locked = tool.Drawing.is_viewport_locked_to_drawing(space)
+    if not is_locked and (
+        space.region_3d.view_perspective != "CAMERA"
+        or not tool.Drawing.is_drawing_camera(tool.Drawing.get_viewport_camera(space))
+    ):
+        return
+    text = ""
+    if is_locked and space.camera and (drawing := tool.Ifc.get_entity(space.camera)):
+        text = drawing.Name or "Unnamed"
+    self.layout.operator(
+        "bim.toggle_drawing_viewport_lock", text=text, icon="LOCKED" if is_locked else "UNLOCKED", depress=is_locked
+    )

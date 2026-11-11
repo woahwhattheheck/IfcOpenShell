@@ -2587,14 +2587,13 @@ class Drawing(bonsai.core.tool.Drawing):
         return cls.get_drawing_subcontexts(target_view)
 
     @classmethod
-    def activate_drawing(cls, camera: bpy.types.Object) -> None:
+    def activate_drawing(cls, camera: bpy.types.Object, area: Optional[bpy.types.Area] = None) -> None:
         # Sync viewport objects visibility with selectors from EPset_Drawing/Include and /Exclude
         drawing = tool.Ifc.get_entity(camera)
         assert drawing and isinstance(camera.data, bpy.types.Camera)
         cls.import_annotations_in_group(cls.get_drawing_group(drawing))
 
-        filtered_elements = cls.get_drawing_elements(drawing) | cls.get_drawing_spaces(drawing)
-        filtered_elements.add(drawing)
+        filtered_elements = cls.get_drawing_filtered_elements(drawing)
 
         target_view = cls.get_drawing_target_view(drawing)
         subcontexts = cls.get_drawing_subcontexts(target_view)
@@ -2628,6 +2627,21 @@ class Drawing(bonsai.core.tool.Drawing):
                     has_context = True
                     break
 
+        visible_objects = cls.get_drawing_visible_objects(filtered_elements)
+        cls.isolate_drawing_objects(visible_objects, camera, area)
+
+        cls.import_camera_props(drawing, camera.data)
+
+    @classmethod
+    def get_drawing_filtered_elements(cls, drawing: ifcopenshell.entity_instance) -> set[ifcopenshell.entity_instance]:
+        filtered_elements = cls.get_drawing_elements(drawing) | cls.get_drawing_spaces(drawing)
+        filtered_elements.add(drawing)
+        return filtered_elements
+
+    @classmethod
+    def get_drawing_visible_objects(
+        cls, filtered_elements: set[ifcopenshell.entity_instance]
+    ) -> list[bpy.types.Object]:
         linked_handles: set[bpy.types.Object] = set()
         for link in tool.Project.get_project_props().get_loaded_links_for_drawings():
             try:
@@ -2645,9 +2659,200 @@ class Drawing(bonsai.core.tool.Drawing):
             else:
                 if obj.hide_get() is False:
                     visible_objects.append(obj)
-        tool.Blender.isolate_objects(visible_objects)
+        return visible_objects
 
-        cls.import_camera_props(drawing, camera.data)
+    @classmethod
+    def isolate_drawing_objects(
+        cls, objs: list[bpy.types.Object], camera: bpy.types.Object, area: Optional[bpy.types.Area] = None
+    ) -> None:
+        """Show only ``objs`` in the viewport the drawing is activated in.
+
+        Viewports locked to other drawings keep showing their own drawing's objects.
+        """
+        locked_spaces = [
+            space
+            for a in tool.Blender.get_view3d_areas()
+            if a != area and cls.is_viewport_locked_to_drawing(space := a.spaces.active)
+        ]
+        space = area.spaces.active if area else None
+        is_area_locked = space is not None and cls.is_viewport_locked_to_drawing(space)
+
+        if not locked_spaces and not is_area_locked:
+            tool.Blender.isolate_objects(objs)
+            return
+
+        # Hiding objects is global, so keep everything a locked viewport shows visible and
+        # rely on local view to show each drawing's objects in its own viewport only.
+        view_layer = bpy.context.view_layer
+        view_layer.update()
+        visible = set(objs)
+        for locked_space in locked_spaces:
+            visible.update(obj for obj in view_layer.objects if obj.local_view_get(locked_space))
+        for obj in view_layer.objects:
+            if obj.hide_get() != (should_hide := obj not in visible):
+                obj.hide_set(should_hide)
+
+        if area is None or space is None:
+            return
+        if is_area_locked:
+            # The viewport stays locked, now to the activated drawing.
+            space.camera = camera
+            cls.set_viewport_local_view(area, objs)
+        # Every unlocked camera viewport follows the scene camera. Keep their local
+        # isolation in sync, while preserving perspective views and local cameras.
+        for viewport_area in tool.Blender.get_view3d_areas():
+            viewport_space = viewport_area.spaces.active
+            if not viewport_space.use_local_camera and viewport_space.region_3d.view_perspective == "CAMERA":
+                cls.set_viewport_local_view(viewport_area, objs)
+
+    @classmethod
+    def is_drawing_camera(cls, obj: Union[bpy.types.Object, None]) -> bool:
+        if obj is None or not isinstance(obj.data, bpy.types.Camera):
+            return False
+        element = tool.Ifc.get_entity(obj)
+        return bool(element and element.is_a("IfcAnnotation") and element.ObjectType == "DRAWING")
+
+    @classmethod
+    def get_viewport_camera(cls, space: bpy.types.SpaceView3D) -> Union[bpy.types.Object, None]:
+        """Get the camera the viewport looks through when in camera view."""
+        if space.use_local_camera and space.camera:
+            return space.camera
+        assert bpy.context.scene
+        return bpy.context.scene.camera
+
+    @classmethod
+    def is_viewport_locked_to_drawing(cls, space: bpy.types.SpaceView3D) -> bool:
+        """Whether viewport keeps showing its own drawing when another drawing is activated.
+
+        A locked viewport looks through the drawing camera as its local camera
+        and shows the drawing's objects using local view.
+        """
+        return bool(space.use_local_camera and space.local_view and cls.is_drawing_camera(space.camera))
+
+    @classmethod
+    def is_drawing_local_view(cls, space: bpy.types.SpaceView3D) -> bool:
+        """Whether viewport's local view just isolates a drawing, see ``isolate_drawing_objects``."""
+        if not space.local_view:
+            return False
+        if cls.is_viewport_locked_to_drawing(space):
+            return True
+        # While some viewports are locked, the active drawing is also isolated using local view.
+        assert bpy.context.scene and space.region_3d
+        return (
+            not space.use_local_camera
+            and space.region_3d.view_perspective == "CAMERA"
+            and cls.is_drawing_camera(bpy.context.scene.camera)
+            and any(cls.is_viewport_locked_to_drawing(a.spaces.active) for a in tool.Blender.get_view3d_areas())
+        )
+
+    @classmethod
+    def get_drawing_target_area(cls, context: bpy.types.Context) -> Union[bpy.types.Area, None]:
+        """Get the viewport to activate a drawing in.
+
+        It's the viewport the drawing is activated from or the first viewport not locked to a drawing.
+        """
+        if (area := context.area) and area.type == "VIEW_3D":
+            return area
+        areas = tool.Blender.get_view3d_areas()
+        for a in areas:
+            if not cls.is_viewport_locked_to_drawing(a.spaces.active):
+                return a
+        return areas[0] if areas else None
+
+    @classmethod
+    def lock_viewport_to_drawing(cls, area: bpy.types.Area, camera: bpy.types.Object) -> None:
+        space = area.spaces.active
+        assert isinstance(space, bpy.types.SpaceView3D) and space.region_3d
+        assert bpy.context.scene
+
+        if camera == bpy.context.scene.camera:
+            # Keep what the viewport currently shows for the active drawing.
+            objs = [obj for obj in bpy.context.view_layer.objects if obj.visible_get(viewport=space)]
+        else:
+            drawing = tool.Ifc.get_entity(camera)
+            assert drawing
+            cls.import_annotations_in_group(cls.get_drawing_group(drawing))
+            objs = cls.get_drawing_visible_objects(cls.get_drawing_filtered_elements(drawing))
+            for obj in objs:
+                if obj.hide_get():
+                    obj.hide_set(False)
+        if camera not in objs:
+            objs.append(camera)
+
+        space.camera = camera
+        space.use_local_camera = True
+        space.region_3d.view_perspective = "CAMERA"
+        cls.set_viewport_local_view(area, objs)
+
+    @classmethod
+    def unlock_viewport_from_drawing(cls, area: bpy.types.Area) -> None:
+        space = area.spaces.active
+        assert isinstance(space, bpy.types.SpaceView3D)
+        drawing_local_areas = [
+            a for a in tool.Blender.get_view3d_areas() if cls.is_drawing_local_view(a.spaces.active)
+        ]
+        cls.exit_viewport_local_view(area)
+        space.use_local_camera = False
+
+        # Follow the active drawing again.
+        assert bpy.context.scene
+        camera = bpy.context.scene.camera
+        if not cls.is_drawing_camera(camera):
+            return
+        assert camera and (drawing := tool.Ifc.get_entity(camera))
+        objs = cls.get_drawing_visible_objects(cls.get_drawing_filtered_elements(drawing))
+        other_areas = [a for a in tool.Blender.get_view3d_areas() if a != area]
+        if any(cls.is_viewport_locked_to_drawing(a.spaces.active) for a in other_areas):
+            cls.set_viewport_local_view(area, [obj for obj in objs if not obj.hide_get()])
+        else:
+            # Restore ordinary isolation when the final lock is removed. Capture
+            # drawing local views before unlock so unrelated user views are kept.
+            tool.Blender.isolate_objects(objs)
+            for drawing_area in drawing_local_areas:
+                cls.exit_viewport_local_view(drawing_area)
+
+    @classmethod
+    def set_viewport_local_view(cls, area: bpy.types.Area, objs: Iterable[bpy.types.Object]) -> None:
+        """Make viewport show only ``objs``, using Blender's local view."""
+        space = area.spaces.active
+        assert isinstance(space, bpy.types.SpaceView3D)
+        view_layer = bpy.context.view_layer
+        objs = {obj for obj in objs if view_layer.objects.get(obj.name) == obj}
+        if not objs:
+            return
+
+        if space.local_view is None:
+            # Local view is entered with the selected objects, so select one of them temporarily.
+            previously_selected = list(bpy.context.selected_objects)
+            previously_active = view_layer.objects.active
+            seed = next((obj for obj in objs if obj.visible_get() and not obj.hide_select), None)
+            if seed is None:
+                return
+            for obj in previously_selected:
+                obj.select_set(False)
+            seed.select_set(True)
+            region = next(r for r in area.regions if r.type == "WINDOW")
+            with bpy.context.temp_override(area=area, region=region, space_data=space):
+                bpy.ops.view3d.localview(frame_selected=False)
+            seed.select_set(False)
+            for obj in previously_selected:
+                obj.select_set(True)
+            view_layer.objects.active = previously_active
+            if space.local_view is None:
+                return
+
+        for obj in view_layer.objects:
+            obj.local_view_set(space, obj in objs)
+
+    @classmethod
+    def exit_viewport_local_view(cls, area: bpy.types.Area) -> None:
+        space = area.spaces.active
+        assert isinstance(space, bpy.types.SpaceView3D)
+        if space.local_view is None:
+            return
+        region = next(r for r in area.regions if r.type == "WINDOW")
+        with bpy.context.temp_override(area=area, region=region, space_data=space):
+            bpy.ops.view3d.localview(frame_selected=False)
 
     @classmethod
     def get_elements_in_camera_view(
@@ -3023,8 +3228,16 @@ class Drawing(bonsai.core.tool.Drawing):
 
     @classmethod
     def hide_all_drawing_collections(cls) -> None:
+        # Viewports locked to drawings keep showing their annotations.
+        locked_cameras = {
+            space.camera
+            for area in tool.Blender.get_view3d_areas()
+            if cls.is_viewport_locked_to_drawing(space := area.spaces.active)
+        }
         for element in tool.Ifc.get().by_type("IfcAnnotation"):
             if element.ObjectType == "DRAWING" and (obj := tool.Ifc.get_object(element)):
+                if obj in locked_cameras:
+                    continue
                 tool.Blender.get_layer_collection(obj.users_collection[0]).hide_viewport = True
 
     @classmethod

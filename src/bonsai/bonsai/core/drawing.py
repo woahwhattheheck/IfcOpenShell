@@ -629,11 +629,12 @@ def activate_drawing_view(
     blender: type[tool.Blender],
     drawing_tool: type[tool.Drawing],
     drawing: ifcopenshell.entity_instance,
+    area: Optional[bpy.types.Area] = None,
 ) -> None:
     camera = ifc.get_object(drawing)
     if not camera:
         camera = drawing_tool.import_drawing(drawing)
         drawing_tool.import_annotations_in_group(drawing_tool.get_drawing_group(drawing))
-    blender.activate_camera(camera)
+    blender.activate_camera(camera, area)
     drawing_tool.isolate_camera_collection(camera)
-    drawing_tool.activate_drawing(camera)
+    drawing_tool.activate_drawing(camera, area)

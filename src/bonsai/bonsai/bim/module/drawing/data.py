@@ -19,7 +19,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import bpy
 import ifcopenshell.util.classification
@@ -255,7 +255,7 @@ class DecoratorData:
         dimension = {}
         fall = {}
         symbol = {}
-        for obj in bpy.context.visible_objects:
+        for obj in cls.get_visible_objects():
             if not (element := tool.Ifc.get_entity(obj)):
                 continue
             if tool.Drawing.is_annotation_object_type(element, ("TEXT", "TEXT_LEADER")):
@@ -828,23 +828,54 @@ class DecoratorData:
         return tool.Drawing.get_annotation_symbol(element)
 
     @classmethod
-    def object_decorators(cls, handler):
+    def get_visible_objects(cls) -> list[bpy.types.Object]:
+        spaces = [area.spaces.active for area in tool.Blender.get_view3d_areas()]
+        if not any(tool.Drawing.is_viewport_locked_to_drawing(space) for space in spaces):
+            return bpy.context.visible_objects
+        # Viewports locked to drawings show different objects, include objects visible in any of them.
+        return [obj for obj in bpy.context.view_layer.objects if any(obj.visible_get(viewport=s) for s in spaces)]
+
+    @classmethod
+    def get_viewport_object_decorators(
+        cls, handler, space: bpy.types.SpaceView3D
+    ) -> list[tuple[bpy.types.Object, Any]]:
+        if not tool.Drawing.is_viewport_locked_to_drawing(space):
+            return cls.data.get("object_decorators", [])
+        # Viewport is locked to its own drawing, which may not be the active one.
+        camera = space.camera
+        assert camera
+        locked_object_decorators = cls.data.setdefault("locked_object_decorators", {})
+        if camera.name not in locked_object_decorators:
+            locked_object_decorators[camera.name] = cls.object_decorators(handler, camera, space)
+        return locked_object_decorators[camera.name]
+
+    @classmethod
+    def object_decorators(
+        cls,
+        handler,
+        camera: Optional[bpy.types.Object] = None,
+        viewport: Optional[bpy.types.SpaceView3D] = None,
+    ):
         import bonsai.bim.module.drawing.decoration
 
         if not bonsai.bim.module.drawing.decoration.DecorationsHandler.installed:
             return []
 
-        props = tool.Drawing.get_document_props()
-        if (drawing := props.get_active_drawing()) is None:
-            return []
-
-        camera = tool.Ifc.get_object(drawing)
+        if camera is None:
+            props = tool.Drawing.get_document_props()
+            if (drawing := props.get_active_drawing()) is None:
+                return []
+            camera = tool.Ifc.get_object(drawing)
         assert isinstance(camera, bpy.types.Object)
         collection = tool.Blender.get_object_bim_props(camera).collection
         assert collection
 
         results = []
-        viewport = tool.Blender.get_view3d_space()
+        if viewport is None:
+            # Viewports locked to other drawings don't show the active drawing's annotations.
+            spaces = [area.spaces.active for area in tool.Blender.get_view3d_areas()]
+            viewport = next((s for s in spaces if not tool.Drawing.is_viewport_locked_to_drawing(s)), None)
+            viewport = viewport or tool.Blender.get_view3d_space()
 
         for obj in collection.all_objects:
             if not obj.visible_get(viewport=viewport):

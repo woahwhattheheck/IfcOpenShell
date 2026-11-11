@@ -171,10 +171,16 @@ class BaseDecorator:
         self.line_shader = gpu.shader.from_builtin("POLYLINE_UNIFORM_COLOR")
         self.base_shader = gpu.shader.from_builtin("UNIFORM_COLOR")
 
+    def get_camera(self, context: bpy.types.Context) -> bpy.types.Object:
+        """Get the drawing camera of the viewport being decorated."""
+        if isinstance(space := context.space_data, bpy.types.SpaceView3D):
+            return tool.Drawing.get_viewport_camera(space)
+        return context.scene.camera
+
     def get_camera_width_mm(self):
         # Horrific prototype code to ensure bgl draws at drawing scales
         # https://blender.stackexchange.com/questions/16493/is-there-a-way-to-fit-the-viewport-to-the-current-field-of-view
-        camera = bpy.context.scene.camera
+        camera = self.get_camera(bpy.context)
         render = bpy.context.scene.render
 
         # Always use the camera's ortho_scale as the width in model space
@@ -536,7 +542,7 @@ class BaseDecorator:
         self.draw_lines(context, None, output_verts, output_edges)
 
     def get_annotation_direction(self, context: bpy.types.Context, obj: bpy.types.Object) -> Vector:
-        camera = context.scene.camera
+        camera = self.get_camera(context)
 
         def get_basis_vector(matrix, i=0):
             """returns basis vector for i in world space, unaffected by object scale"""
@@ -1667,12 +1673,25 @@ class CutDecorator:
         if not context.scene.camera:
             return
 
+        # Cuts are only calculated for the active drawing, not for viewports locked to other drawings.
+        space = context.space_data
+        if (
+            isinstance(space, bpy.types.SpaceView3D)
+            and tool.Drawing.is_viewport_locked_to_drawing(space)
+            and space.camera != context.scene.camera
+        ):
+            return
+
         # Check if any viewport is in local view
         in_local_view = False
         for area in context.screen.areas:
             if area.type == "VIEW_3D":
                 space = area.spaces.active
-                if isinstance(space, bpy.types.SpaceView3D) and space.local_view:
+                if (
+                    isinstance(space, bpy.types.SpaceView3D)
+                    and space.local_view
+                    and not tool.Drawing.is_drawing_local_view(space)
+                ):
                     in_local_view = True
                     break
 
@@ -2108,7 +2127,11 @@ class DecorationsHandler:
         for area in context.screen.areas:
             if area.type == "VIEW_3D":
                 space = area.spaces.active
-                if isinstance(space, bpy.types.SpaceView3D) and space.local_view:
+                if (
+                    isinstance(space, bpy.types.SpaceView3D)
+                    and space.local_view
+                    and not tool.Drawing.is_drawing_local_view(space)
+                ):
                     in_local_view = True
                     break
 
@@ -2138,6 +2161,6 @@ class DecorationsHandler:
         if not DecoratorData.is_loaded:
             DecoratorData.load(self)
 
-        object_decorators = DecoratorData.data.get("object_decorators", [])
+        object_decorators = DecoratorData.get_viewport_object_decorators(self, context.space_data)
         for obj, decorator in object_decorators:
             decorator.decorate(context, obj)

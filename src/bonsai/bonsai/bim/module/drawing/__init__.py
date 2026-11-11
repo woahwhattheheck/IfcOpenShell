@@ -108,6 +108,7 @@ classes = (
     operator.SelectAssignedProduct,
     operator.SelectSimilarTextLiteralValue,
     operator.ToggleTargetView,
+    operator.ToggleDrawingViewportLock,
     operator.ToggleDrawingCategorySelection,
     operator.OpenDocumentationWebUi,
     operator.FilterSelectedObjectsIfIntersectedByCamera,
@@ -197,6 +198,7 @@ def register():
     bpy.app.handlers.load_post.append(handler.load_post)
     bpy.app.handlers.depsgraph_update_pre.append(handler.depsgraph_update_pre_handler)
     bpy.types.VIEW3D_MT_image_add.append(ui.add_object_button)
+    bpy.types.VIEW3D_HT_header.append(ui.draw_drawing_viewport_lock)
     bpy.types.VIEW3D_MT_object_context_menu.append(menu_func)
 
 
@@ -212,4 +214,5 @@ def unregister():
     bpy.app.handlers.load_post.remove(handler.load_post)
     bpy.app.handlers.depsgraph_update_pre.remove(handler.depsgraph_update_pre_handler)
     bpy.types.VIEW3D_MT_image_add.remove(ui.add_object_button)
+    bpy.types.VIEW3D_HT_header.remove(ui.draw_drawing_viewport_lock)
     bpy.types.VIEW3D_MT_object_context_menu.remove(menu_func)

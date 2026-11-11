@@ -86,7 +86,7 @@ class Bcf:
 
 @interface
 class Blender:
-    def activate_camera(cls, obj): pass
+    def activate_camera(cls, obj, area=None): pass
     def apply_bmesh(cls, mesh, bm, obj=None): pass
     def bmesh_join(cls, bm_a, bm_b, callback=None): pass
     def create_ifc_object(cls, ifc_class: str, name: Optional[str] = None, data=None): pass
@@ -320,7 +320,7 @@ class Document:
 
 @interface
 class Drawing:
-    def activate_drawing(cls, camera): pass
+    def activate_drawing(cls, camera, area=None): pass
     def add_literal(cls, **attributes): pass
     def clear_annotation_relationships(cls, drawing): pass
     def copy_representation(cls, source, dest): pass

@@ -145,25 +145,20 @@ class Blender(bonsai.core.tool.Blender):
     BLENDER_5 = bpy.app.version >= (5, 0, 0)
 
     @classmethod
-    def activate_camera(cls, obj: bpy.types.Object) -> None:
-
-        area = cls.get_view3d_area()
+    def activate_camera(cls, obj: bpy.types.Object, area: Optional[bpy.types.Area] = None) -> None:
+        area = area or cls.get_view3d_area()
         assert area
-        assert isinstance((space := area.spaces[0]), bpy.types.SpaceView3D)
-        is_local_view = space.local_view is not None
+        assert isinstance((space := area.spaces.active), bpy.types.SpaceView3D)
 
-        assert bpy.context.screen and bpy.context.scene
-        if is_local_view:
-            # Turn off local view before activating drawing, and then turn it on again.
-            for a in bpy.context.screen.areas:
-                if a.type == "VIEW_3D":
-                    override = {"area": a, "region": a.regions[-1], "space": a.spaces[0], "scene": bpy.context.scene}
-                    with bpy.context.temp_override(**override):
-                        bpy.ops.view3d.localview()
-                    bpy.context.scene.camera = obj
+        assert bpy.context.scene
+        # Only leave local view in the target viewport. Other viewports may contain
+        # a user-created local view, or a drawing lock that must remain in place.
+        if space.local_view is not None and not space.use_local_camera:
+            region = next(r for r in area.regions if r.type == "WINDOW")
+            with bpy.context.temp_override(area=area, region=region, space_data=space, scene=bpy.context.scene):
+                bpy.ops.view3d.localview()
 
-        else:
-            bpy.context.scene.camera = obj
+        bpy.context.scene.camera = obj
 
         assert space.region_3d
         space.region_3d.view_perspective = "CAMERA"
@@ -389,6 +384,19 @@ class Blender(bonsai.core.tool.Blender):
         return f"{module.lower()}.{func}"
 
     @classmethod
+    def get_view3d_areas(cls) -> list[bpy.types.Area]:
+        """Get all `VIEW_3D` areas showing the current scene, starting with the current window."""
+        assert (wm := bpy.context.window_manager)
+        windows = sorted(wm.windows, key=lambda window: window != bpy.context.window)
+        return [
+            area
+            for window in windows
+            if window.scene == bpy.context.scene
+            for area in window.screen.areas
+            if area.type == "VIEW_3D"
+        ]
+
+    @classmethod
     def get_view3d_space(cls) -> Union[bpy.types.SpaceView3D, None]:
         if area := cls.get_view3d_area():
             space = area.spaces.active
@@ -430,15 +438,15 @@ class Blender(bonsai.core.tool.Blender):
         return context_override
 
     @classmethod
-    def get_viewport_position(cls) -> dict:
-        region_3d = cls.get_viewport_context()["area"].spaces[0].region_3d
+    def get_viewport_position(cls, area: Optional[bpy.types.Area] = None) -> dict:
+        region_3d = (area or cls.get_viewport_context()["area"]).spaces[0].region_3d
         copy_if_possible = lambda x: x.copy() if hasattr(x, "copy") else x
         viewport_data = {attr: copy_if_possible(getattr(region_3d, attr)) for attr in VIEWPORT_ATTRIBUTES}
         return viewport_data
 
     @classmethod
-    def set_viewport_position(cls, data: dict) -> None:
-        region_3d = cls.get_viewport_context()["area"].spaces[0].region_3d
+    def set_viewport_position(cls, data: dict, area: Optional[bpy.types.Area] = None) -> None:
+        region_3d = (area or cls.get_viewport_context()["area"]).spaces[0].region_3d
         for attr in VIEWPORT_ATTRIBUTES:
             setattr(region_3d, attr, data[attr])
 

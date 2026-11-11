@@ -2558,13 +2558,19 @@ class ActivateDrawingBase(tool.Ifc.Operator):
 
         viewport_position = None
 
-        v3d_space = tool.Blender.get_view3d_space()
-        assert v3d_space
-        if self.should_view_from_camera:
+        area = tool.Drawing.get_drawing_target_area(context)
+        assert area and isinstance((v3d_space := area.spaces.active), bpy.types.SpaceView3D)
+        is_area_locked = tool.Drawing.is_viewport_locked_to_drawing(v3d_space)
+        if is_area_locked:
+            # Viewport stays locked, but to the activated drawing.
+            pass
+        elif self.should_view_from_camera:
+            tool.Drawing.exit_viewport_local_view(area)
             # Since we must switch to drawing camera, undo local camera in viewport.
             # The code is needed to undo `else` branch from activating other cameras.
             v3d_space.use_local_camera = False
         else:
+            tool.Drawing.exit_viewport_local_view(area)
             # Since we use `scene.camera` to store active drawing,
             # the only way to preserve previous drawing camera position is making it local.
             r3d = v3d_space.region_3d
@@ -2579,17 +2585,17 @@ class ActivateDrawingBase(tool.Ifc.Operator):
                         v3d_space.camera = previous_camera
                         v3d_space.use_local_camera = True
             else:
-                viewport_position = tool.Blender.get_viewport_position()
+                viewport_position = tool.Blender.get_viewport_position(area)
 
-        core.activate_drawing_view(tool.Ifc, tool.Blender, tool.Drawing, drawing=drawing)
+        core.activate_drawing_view(tool.Ifc, tool.Blender, tool.Drawing, drawing=drawing, area=area)
 
-        if not self.should_view_from_camera:
+        if not self.should_view_from_camera and not is_area_locked:
             if viewport_position is None:
                 # Local camera takes priority over active scene camera,
                 # so nothing to do after drawing view activation.
                 pass
             else:
-                tool.Blender.set_viewport_position(viewport_position)
+                tool.Blender.set_viewport_position(viewport_position, area)
 
         dprops.active_drawing_id = self.drawing
         dprops.drawing_styles.clear()
@@ -2658,6 +2664,43 @@ class ActivateDrawingFromSheet(bpy.types.Operator, ActivateDrawingBase):
             cls.poll_message_set("No drawing selected.")
             return False
         return True
+
+
+class ToggleDrawingViewportLock(bpy.types.Operator):
+    bl_idname = "bim.toggle_drawing_viewport_lock"
+    bl_label = "Toggle Drawing Viewport Lock"
+    bl_options = {"REGISTER"}
+    bl_description = (
+        "Lock the viewport to the drawing it shows, so activating another drawing won't change it.\n\n"
+        "This allows seeing multiple drawings at once, one per viewport"
+    )
+
+    @classmethod
+    def poll(cls, context):
+        if not (area := tool.Drawing.get_drawing_target_area(context)):
+            cls.poll_message_set("No 3D viewport found.")
+            return False
+        space = area.spaces.active
+        assert isinstance(space, bpy.types.SpaceView3D) and space.region_3d
+        if tool.Drawing.is_viewport_locked_to_drawing(space):
+            return True
+        if space.region_3d.view_perspective != "CAMERA" or not tool.Drawing.is_drawing_camera(
+            tool.Drawing.get_viewport_camera(space)
+        ):
+            cls.poll_message_set("Viewport is not looking through a drawing camera.")
+            return False
+        return True
+
+    def execute(self, context):
+        area = tool.Drawing.get_drawing_target_area(context)
+        assert area and isinstance((space := area.spaces.active), bpy.types.SpaceView3D)
+        if tool.Drawing.is_viewport_locked_to_drawing(space):
+            tool.Drawing.unlock_viewport_from_drawing(area)
+        else:
+            camera = tool.Drawing.get_viewport_camera(space)
+            assert camera
+            tool.Drawing.lock_viewport_to_drawing(area, camera)
+        return {"FINISHED"}
 
 
 class RemoveDrawing(bpy.types.Operator, tool.Ifc.Operator):

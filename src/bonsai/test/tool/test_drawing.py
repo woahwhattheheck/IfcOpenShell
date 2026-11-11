@@ -17,6 +17,7 @@
 # along with Bonsai.  If not, see <http://www.gnu.org/licenses/>.
 
 import os
+import types
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -1139,3 +1140,230 @@ class TestIsDrawingActive(NewFile):
         # addresses, so this assertion documents that assumption.
         assert bpy.app.background is True
         assert subject.is_drawing_active() is True
+
+
+class DrawingViewportsFile(NewFile):
+    """Two 3D viewports and two plan drawings, each showing its own wall."""
+
+    @pytest.fixture(autouse=True)
+    def setup_drawing_viewports(self, setup):
+        bpy.ops.bim.create_project()
+        tool.Project.save_test_project()
+        self.walls = []
+        for x in (0.0, 1000.0):
+            # Plan cameras look down from the storey elevation.
+            bpy.ops.mesh.primitive_cube_add(size=1, location=(x, 0, -1))
+            bpy.ops.bim.assign_class(ifc_class="IfcWall", predefined_type="SOLIDWALL", userdefined_type="")
+            self.walls.append(bpy.context.active_object)
+
+        bpy.ops.bim.load_drawings()
+        bpy.ops.bim.add_drawing()
+        bpy.ops.bim.add_drawing()
+        self.drawings = [e for e in tool.Ifc.get().by_type("IfcAnnotation") if e.ObjectType == "DRAWING"]
+        assert len(self.drawings) == 2
+        tool.Ifc.get_object(self.drawings[1]).location.x = 1000.0
+        bpy.context.view_layer.update()
+
+        assert (screen := bpy.context.screen)
+        next(a for a in screen.areas if a.type == "DOPESHEET_EDITOR").type = "VIEW_3D"
+        self.areas = tool.Blender.get_view3d_areas()
+        assert len(self.areas) == 2
+
+    def override(self, area):
+        region = next(r for r in area.regions if r.type == "WINDOW")
+        return bpy.context.temp_override(area=area, region=region, space_data=area.spaces.active)
+
+    def activate_drawing(self, drawing, area=None):
+        if area is None:
+            bpy.ops.bim.activate_drawing(drawing=drawing.id())
+            return
+        with self.override(area):
+            bpy.ops.bim.activate_drawing(drawing=drawing.id())
+
+    def toggle_lock(self, area):
+        with self.override(area):
+            bpy.ops.bim.toggle_drawing_viewport_lock()
+
+    def is_visible(self, obj, area):
+        bpy.context.view_layer.update()
+        return obj.visible_get(viewport=area.spaces.active)
+
+
+class TestLockViewportToDrawing(DrawingViewportsFile):
+    def test_run(self):
+        area_a, area_b = self.areas
+        wall_a, wall_b = self.walls
+        self.activate_drawing(self.drawings[0], area_a)
+        camera_a = tool.Ifc.get_object(self.drawings[0])
+        self.toggle_lock(area_a)
+
+        space = area_a.spaces.active
+        assert subject.is_viewport_locked_to_drawing(space)
+        assert space.camera == camera_a
+        assert self.is_visible(wall_a, area_a)
+        assert not self.is_visible(wall_b, area_a)
+
+    def test_activating_another_drawing_keeps_the_locked_viewport(self):
+        area_a, area_b = self.areas
+        wall_a, wall_b = self.walls
+        self.activate_drawing(self.drawings[0], area_a)
+        camera_a = tool.Ifc.get_object(self.drawings[0])
+        self.toggle_lock(area_a)
+
+        # Activated from the drawings panel, so the drawing goes to the first unlocked viewport.
+        self.activate_drawing(self.drawings[1])
+        camera_b = tool.Ifc.get_object(self.drawings[1])
+
+        assert bpy.context.scene.camera == camera_b
+        space_a, space_b = area_a.spaces.active, area_b.spaces.active
+        assert subject.is_viewport_locked_to_drawing(space_a)
+        assert space_a.camera == camera_a
+        assert space_a.region_3d.view_perspective == "CAMERA"
+        assert not subject.is_viewport_locked_to_drawing(space_b)
+        assert subject.get_viewport_camera(space_b) == camera_b
+        assert space_b.region_3d.view_perspective == "CAMERA"
+
+        # Each viewport only shows the elements of its own drawing.
+        assert not wall_a.hide_get() and not wall_b.hide_get()
+        assert self.is_visible(wall_a, area_a) and not self.is_visible(wall_b, area_a)
+        assert self.is_visible(wall_b, area_b) and not self.is_visible(wall_a, area_b)
+        assert subject.is_drawing_local_view(space_a) and subject.is_drawing_local_view(space_b)
+
+    def test_activating_a_drawing_from_a_locked_viewport_relocks_it(self):
+        area_a, area_b = self.areas
+        wall_a, wall_b = self.walls
+        self.activate_drawing(self.drawings[0], area_a)
+        self.toggle_lock(area_a)
+
+        self.activate_drawing(self.drawings[1], area_a)
+
+        space_a = area_a.spaces.active
+        assert subject.is_viewport_locked_to_drawing(space_a)
+        assert space_a.camera == tool.Ifc.get_object(self.drawings[1])
+        assert self.is_visible(wall_b, area_a) and not self.is_visible(wall_a, area_a)
+
+    def test_locking_a_viewport_looking_through_an_inactive_drawing(self):
+        area_a, area_b = self.areas
+        wall_a, wall_b = self.walls
+        self.activate_drawing(self.drawings[0], area_a)
+        camera_a = tool.Ifc.get_object(self.drawings[0])
+        # ALT+CLICK keeps viewport looking through the previous drawing camera.
+        with self.override(area_a):
+            bpy.ops.bim.activate_drawing(drawing=self.drawings[1].id(), should_view_from_camera=False)
+        space_a = area_a.spaces.active
+        assert space_a.use_local_camera and space_a.camera == camera_a
+        assert wall_a.hide_get()
+
+        self.toggle_lock(area_a)
+
+        assert subject.is_viewport_locked_to_drawing(space_a)
+        assert space_a.camera == camera_a
+        assert not wall_a.hide_get()
+        assert self.is_visible(wall_a, area_a) and not self.is_visible(wall_b, area_a)
+
+
+class TestUnlockViewportFromDrawing(DrawingViewportsFile):
+    def test_run(self):
+        area_a, area_b = self.areas
+        wall_a, wall_b = self.walls
+        self.activate_drawing(self.drawings[0], area_a)
+        self.toggle_lock(area_a)
+        self.activate_drawing(self.drawings[1])
+
+        self.toggle_lock(area_a)
+
+        space_a = area_a.spaces.active
+        assert not subject.is_viewport_locked_to_drawing(space_a)
+        assert space_a.local_view is None
+        assert area_b.spaces.active.local_view is None
+        assert wall_a.hide_get() and not wall_b.hide_get()
+        assert not space_a.use_local_camera
+        # Viewport follows the active drawing again.
+        assert subject.get_viewport_camera(space_a) == tool.Ifc.get_object(self.drawings[1])
+
+    def test_unlocking_one_of_several_locked_viewports(self):
+        area_a, area_b = self.areas
+        wall_a, wall_b = self.walls
+        self.activate_drawing(self.drawings[0], area_a)
+        self.toggle_lock(area_a)
+        self.activate_drawing(self.drawings[1], area_b)
+        self.toggle_lock(area_b)
+
+        self.toggle_lock(area_b)
+
+        space_b = area_b.spaces.active
+        assert not subject.is_viewport_locked_to_drawing(space_b)
+        # Viewport A is still locked, so B only shows the active drawing.
+        assert self.is_visible(wall_b, area_b) and not self.is_visible(wall_a, area_b)
+        assert self.is_visible(wall_a, area_a) and not self.is_visible(wall_b, area_a)
+
+
+class TestActivateModelWithLockedViewport(DrawingViewportsFile):
+    def test_run(self):
+        area_a, area_b = self.areas
+        self.activate_drawing(self.drawings[0], area_a)
+        self.toggle_lock(area_a)
+        self.activate_drawing(self.drawings[1])
+
+        bpy.ops.bim.activate_model()
+
+        camera_a = tool.Ifc.get_object(self.drawings[0])
+        camera_b = tool.Ifc.get_object(self.drawings[1])
+        assert not tool.Blender.get_layer_collection(camera_a.users_collection[0]).hide_viewport
+        assert tool.Blender.get_layer_collection(camera_b.users_collection[0]).hide_viewport
+
+
+class TestActivateDrawingWithoutLockedViewports(DrawingViewportsFile):
+    def test_run(self):
+        area_a, area_b = self.areas
+        wall_a, wall_b = self.walls
+        self.activate_drawing(self.drawings[0])
+        self.activate_drawing(self.drawings[1])
+
+        # Without locked viewports, drawing isolation keeps hiding objects and doesn't use local view.
+        assert wall_a.hide_get() and not wall_b.hide_get()
+        assert all(area.spaces.active.local_view is None for area in self.areas)
+        assert bpy.context.scene.camera == tool.Ifc.get_object(self.drawings[1])
+
+    def test_activating_drawing_preserves_another_perspective_local_view(self):
+        area_a, area_b = self.areas
+        self.activate_drawing(self.drawings[0], area_a)
+        space_b = area_b.spaces.active
+        space_b.region_3d.view_perspective = "PERSP"
+        self.walls[0].select_set(True)
+        with self.override(area_b):
+            bpy.ops.view3d.localview(frame_selected=False)
+        assert space_b.local_view is not None
+
+        self.activate_drawing(self.drawings[1], area_a)
+
+        assert space_b.local_view is not None
+        assert space_b.region_3d.view_perspective == "PERSP"
+
+
+class TestDecoratingLockedViewports(DrawingViewportsFile):
+    def test_run(self, monkeypatch):
+        from bonsai.bim.module.drawing.decoration import DecorationsHandler
+
+        area_a, area_b = self.areas
+        self.activate_drawing(self.drawings[0], area_a)
+        bpy.ops.bim.add_annotation()
+        text_a = bpy.context.active_object
+        self.toggle_lock(area_a)
+        self.activate_drawing(self.drawings[1])
+        bpy.ops.bim.add_annotation()
+        text_b = bpy.context.active_object
+        assert text_a != text_b
+
+        monkeypatch.setattr(DecorationsHandler, "installed", True)
+        handler = types.SimpleNamespace(decorators={"TEXT": "text decorator"})
+        DecoratorData.load(handler)
+
+        # Each viewport decorates the annotations of the drawing it shows.
+        assert DecoratorData.get_viewport_object_decorators(handler, area_a.spaces.active) == [
+            (text_a, "text decorator")
+        ]
+        assert DecoratorData.get_viewport_object_decorators(handler, area_b.spaces.active) == [
+            (text_b, "text decorator")
+        ]
+        assert {text_a.name, text_b.name} <= set(DecoratorData.data["text"])

@@ -157,16 +157,12 @@ class Blender(bonsai.core.tool.Blender):
             # Other camera views would otherwise follow the global scene camera change.
             cls.pin_scene_camera_to_other_viewports(previous_camera, space)
         if is_local_view:
-            # Turn off local view before activating drawing, and then turn it on again.
-            for a in bpy.context.screen.areas:
-                if a.type == "VIEW_3D":
-                    override = {"area": a, "region": a.regions[-1], "space": a.spaces[0], "scene": bpy.context.scene}
-                    with bpy.context.temp_override(**override):
-                        bpy.ops.view3d.localview()
-                    bpy.context.scene.camera = obj
+            # Other viewports keep their own local-view state when this drawing changes.
+            region = next(region for region in area.regions if region.type == "WINDOW")
+            with bpy.context.temp_override(area=area, region=region, space_data=space, scene=bpy.context.scene):
+                bpy.ops.view3d.localview(frame_selected=False)
 
-        else:
-            bpy.context.scene.camera = obj
+        bpy.context.scene.camera = obj
 
         assert space.region_3d
         space.region_3d.view_perspective = "CAMERA"

@@ -119,6 +119,43 @@ class TestPinSceneCameraToOtherViewports(NewFile):
         assert perspective_space.camera is None
         assert perspective_space.use_local_camera is False
 
+    @pytest.mark.parametrize("other_local_view", [False, True])
+    def test_activating_from_local_view_preserves_other_viewport(self, other_local_view):
+        assert (screen := bpy.context.screen) and bpy.context.scene
+        active_area = subject.get_view3d_area()
+        assert active_area
+        other_area = next(area for area in screen.areas if area.type == "DOPESHEET_EDITOR")
+        other_area.type = "VIEW_3D"
+        active_space, other_space = active_area.spaces.active, other_area.spaces.active
+        previous_camera = bpy.data.objects.new("Previous Camera", bpy.data.cameras.new("Previous Camera"))
+        new_camera = bpy.data.objects.new("New Camera", bpy.data.cameras.new("New Camera"))
+        bpy.context.scene.collection.objects.link(previous_camera)
+        bpy.context.scene.collection.objects.link(new_camera)
+        bpy.context.scene.camera = previous_camera
+        bpy.ops.mesh.primitive_cube_add()
+
+        def override(area):
+            region = next(region for region in area.regions if region.type == "WINDOW")
+            return bpy.context.temp_override(area=area, region=region, space_data=area.spaces.active)
+
+        with override(active_area):
+            bpy.ops.view3d.localview(frame_selected=False)
+        other_space.region_3d.view_perspective = "CAMERA"
+        if other_local_view:
+            with override(other_area):
+                bpy.ops.view3d.localview(frame_selected=False)
+        assert active_space.local_view is not None
+        assert (other_space.local_view is not None) == other_local_view
+
+        with override(active_area):
+            subject.activate_camera(new_camera)
+
+        assert active_space.local_view is None
+        assert (other_space.local_view is not None) == other_local_view
+        assert bpy.context.scene.camera == new_camera
+        assert other_space.use_local_camera
+        assert other_space.camera == previous_camera
+
 
 class TestViewportDecoratorDrawBatch(NewFile):
     def test_empty_content_pos_skips_shader_calls(self):
